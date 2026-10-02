@@ -1,13 +1,18 @@
 const express = require("express");
 const { z } = require("zod");
+const mongoose = require("mongoose");
 const fs = require("fs");
 
 const requireAuth = require("../middleware/requireAuth");
 const Note = require("../models/Note");
+const upload = require("../middleware/upload");
 
 const router = express.Router();
 
-const upload = require("../middleware/upload");
+
+// -------------------------
+// Validation Schemas
+// -------------------------
 
 const noteSchema = z.object({
     title: z.string().min(3, "Title must be at least 3 characters"),
@@ -18,17 +23,21 @@ const noteSchema = z.object({
 const updateNoteSchema = noteSchema.partial();
 
 
+// -------------------------
 // GET /notes
+// Get logged-in user's notes
+// -------------------------
+
 router.get("/", requireAuth, async (req, res) => {
     try {
         const limit = Number(req.query.limit) || 10;
         const offset = Number(req.query.offset) || 0;
 
-        const userId = Number(req.user.userId);
+        const owner = req.user.userId;
 
-        const total = await Note.countDocuments({ userId });
+        const total = await Note.countDocuments({ owner });
 
-        const userNotes = await Note.find({ userId })
+        const notes = await Note.find({ owner })
             .skip(offset)
             .limit(limit);
 
@@ -37,8 +46,9 @@ router.get("/", requireAuth, async (req, res) => {
             limit,
             offset,
             total,
-            data: userNotes
+            data: notes
         });
+
     } catch (error) {
         res.status(500).json({
             success: false,
@@ -49,33 +59,37 @@ router.get("/", requireAuth, async (req, res) => {
 });
 
 
+// -------------------------
 // GET /notes/stats
+// Get logged-in user's statistics
+// -------------------------
+
 router.get("/stats", requireAuth, async (req, res) => {
     try {
         const sevenDaysAgo = new Date();
+
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
         sevenDaysAgo.setHours(0, 0, 0, 0);
 
+        const owner = new mongoose.Types.ObjectId(req.user.userId);
+
         const stats = await Note.aggregate([
+            {
+                $match: {
+                    owner: owner
+                }
+            },
             {
                 $facet: {
 
-                    // 1. Total notes per user
-                    totalNotesPerUser: [
+                    // Total notes
+                    totalNotes: [
                         {
-                            $group: {
-                                _id: "$userId",
-                                totalNotes: { $sum: 1 }
-                            }
-                        },
-                        {
-                            $sort: {
-                                totalNotes: -1
-                            }
+                            $count: "total"
                         }
                     ],
 
-                    // 2. Most-used tags - Top 10
+                    // Most-used tags
                     mostUsedTags: [
                         {
                             $unwind: "$tags"
@@ -83,7 +97,9 @@ router.get("/stats", requireAuth, async (req, res) => {
                         {
                             $group: {
                                 _id: "$tags",
-                                count: { $sum: 1 }
+                                count: {
+                                    $sum: 1
+                                }
                             }
                         },
                         {
@@ -96,7 +112,7 @@ router.get("/stats", requireAuth, async (req, res) => {
                         }
                     ],
 
-                    // 3. Notes created per day for last 7 days
+                    // Notes created per day
                     notesPerDay: [
                         {
                             $match: {
@@ -113,7 +129,9 @@ router.get("/stats", requireAuth, async (req, res) => {
                                         date: "$createdAt"
                                     }
                                 },
-                                count: { $sum: 1 }
+                                count: {
+                                    $sum: 1
+                                }
                             }
                         },
                         {
@@ -141,12 +159,17 @@ router.get("/stats", requireAuth, async (req, res) => {
     }
 });
 
+
+// -------------------------
 // GET /notes/:id
+// Get one note owned by logged-in user
+// -------------------------
+
 router.get("/:id", requireAuth, async (req, res) => {
     try {
         const note = await Note.findOne({
             _id: req.params.id,
-            userId: Number(req.user.userId)
+            owner: req.user.userId
         });
 
         if (!note) {
@@ -160,6 +183,7 @@ router.get("/:id", requireAuth, async (req, res) => {
             success: true,
             data: note
         });
+
     } catch (error) {
         res.status(500).json({
             success: false,
@@ -170,7 +194,11 @@ router.get("/:id", requireAuth, async (req, res) => {
 });
 
 
+// -------------------------
 // POST /notes
+// Create a note
+// -------------------------
+
 router.post("/", requireAuth, async (req, res) => {
     try {
         const result = noteSchema.safeParse(req.body);
@@ -184,7 +212,7 @@ router.post("/", requireAuth, async (req, res) => {
         }
 
         const newNote = await Note.create({
-            userId: Number(req.user.userId),
+            owner: req.user.userId,
             title: result.data.title,
             content: result.data.content,
             tags: result.data.tags || []
@@ -194,6 +222,7 @@ router.post("/", requireAuth, async (req, res) => {
             success: true,
             data: newNote
         });
+
     } catch (error) {
         res.status(500).json({
             success: false,
@@ -204,7 +233,11 @@ router.post("/", requireAuth, async (req, res) => {
 });
 
 
+// -------------------------
 // PATCH /notes/:id
+// Update a note
+// -------------------------
+
 router.patch("/:id", requireAuth, async (req, res) => {
     try {
         const result = updateNoteSchema.safeParse(req.body);
@@ -220,7 +253,7 @@ router.patch("/:id", requireAuth, async (req, res) => {
         const note = await Note.findOneAndUpdate(
             {
                 _id: req.params.id,
-                userId: Number(req.user.userId)
+                owner: req.user.userId
             },
             {
                 $set: result.data
@@ -242,6 +275,7 @@ router.patch("/:id", requireAuth, async (req, res) => {
             success: true,
             data: note
         });
+
     } catch (error) {
         res.status(500).json({
             success: false,
@@ -252,12 +286,16 @@ router.patch("/:id", requireAuth, async (req, res) => {
 });
 
 
+// -------------------------
 // DELETE /notes/:id
+// Delete a note
+// -------------------------
+
 router.delete("/:id", requireAuth, async (req, res) => {
     try {
         const note = await Note.findOneAndDelete({
             _id: req.params.id,
-            userId: Number(req.user.userId)
+            owner: req.user.userId
         });
 
         if (!note) {
@@ -268,6 +306,7 @@ router.delete("/:id", requireAuth, async (req, res) => {
         }
 
         res.status(204).send();
+
     } catch (error) {
         res.status(500).json({
             success: false,
@@ -278,7 +317,11 @@ router.delete("/:id", requireAuth, async (req, res) => {
 });
 
 
+// -------------------------
 // POST /notes/:id/attachment
+// Upload attachment
+// -------------------------
+
 router.post(
     "/:id/attachment",
     requireAuth,
@@ -287,7 +330,7 @@ router.post(
         try {
             const note = await Note.findOne({
                 _id: req.params.id,
-                userId: Number(req.user.userId)
+                owner: req.user.userId
             });
 
             if (!note) {
@@ -321,6 +364,7 @@ router.post(
                 message: "Attachment uploaded successfully",
                 attachment: note.attachment
             });
+
         } catch (error) {
             res.status(500).json({
                 success: false,
@@ -332,7 +376,11 @@ router.post(
 );
 
 
+// -------------------------
 // GET /notes/:id/attachment
+// Get attachment
+// -------------------------
+
 router.get(
     "/:id/attachment",
     requireAuth,
@@ -340,7 +388,7 @@ router.get(
         try {
             const note = await Note.findOne({
                 _id: req.params.id,
-                userId: Number(req.user.userId)
+                owner: req.user.userId
             });
 
             if (!note) {
@@ -374,6 +422,7 @@ router.get(
             );
 
             stream.pipe(res);
+
         } catch (error) {
             res.status(500).json({
                 success: false,
